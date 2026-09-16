@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FullSnap</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    :root {
+      --ink: #f7f8ff;
+      --muted: #949ab4;
+      --subtle: #666d88;
+      --canvas: #0b0d14;
+      --surface: rgba(24, 27, 40, .78);
+      --surface-hover: #23283a;
+      --line: rgba(255, 255, 255, .09);
+      --line-strong: rgba(255, 255, 255, .15);
+      --accent: #8068ff;
+      --success: #54d5a5;
+      --danger: #ff7488;
+      --radius-md: 13px;
+    }
+
+    body {
+      width: 360px;
+      min-height: 100%;
+      margin: 0;
+      overflow: hidden;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 85% -7%, rgba(128, 104, 255, .21), transparent 33%),
+        radial-gradient(circle at -12% 70%, rgba(62, 145, 255, .10), transparent 28%),
+        var(--canvas);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    button { font: inherit; }
+    svg { display: block; }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 22px 22px 17px;
+    }
+
+    .logo {
+      position: relative;
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      border: 1px solid rgba(255, 255, 255, .18);
+      border-radius: 14px;
+      color: #fff;
+      background: linear-gradient(145deg, #9b7dff 0%, #6b4eff 55%, #a94dff 100%);
+      box-shadow: 0 10px 24px rgba(111, 79, 255, .34), inset 0 1px 0 rgba(255, 255, 255, .28);
+    }
+
+    .logo::after {
+      position: absolute;
+      inset: 4px;
+      border: 1px solid rgba(255, 255, 255, .14);
+      border-radius: 10px;
+      content: "";
+      pointer-events: none;
+    }
+
+    .logo svg { width: 22px; height: 22px; fill: currentColor; }
+    .header-text { min-width: 0; }
+
+    .header-text h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 760;
+      letter-spacing: -.025em;
+    }
+
+    .header-text p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .body { padding: 0 22px 20px; }
+
+    .page-info {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      min-width: 0;
+      margin-bottom: 20px;
+      padding: 11px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: linear-gradient(115deg, rgba(28, 32, 46, .88), rgba(19, 22, 34, .76));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+    }
+
+    .favicon-wrap {
+      position: relative;
+      display: grid;
+      width: 32px;
+      height: 32px;
+      flex: 0 0 auto;
+      place-items: center;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, .08);
+      border-radius: 9px;
+      background: #272c3d;
+    }
+
+    .favicon-wrap::before {
+      width: 13px;
+      height: 13px;
+      border: 2px solid #bbc2dc;
+      border-radius: 50%;
+      content: "";
+      opacity: .55;
+    }
+
+    .favicon-wrap img {
+      position: absolute;
+      width: 17px;
+      height: 17px;
+      border-radius: 4px;
+      background: #272c3d;
+    }
+
+    .page-info .info-text { min-width: 0; overflow: hidden; }
+
+    .page-info .info-title {
+      overflow: hidden;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 680;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .page-info .info-url {
+      overflow: hidden;
+      margin-top: 3px;
+      color: var(--subtle);
+      font-size: 10px;
+      font-weight: 500;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .section-label {
+      display: block;
+      margin: 0 0 9px 2px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .options-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .option-pill {
+      position: relative;
+      display: flex;
+      min-width: 0;
+      min-height: 94px;
+      padding: 11px 9px 10px;
+      cursor: pointer;
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: var(--surface);
+      text-align: left;
+      transition: border-color .18s ease, background .18s ease, box-shadow .18s ease, transform .18s ease;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .option-pill:hover {
+      border-color: var(--line-strong);
+      background: var(--surface-hover);
+      transform: translateY(-1px);
+    }
+
+    .option-pill.active {
+      border-color: rgba(145, 124, 255, .84);
+      background: linear-gradient(145deg, rgba(123, 97, 255, .29), rgba(82, 63, 172, .17));
+      box-shadow: 0 7px 20px rgba(53, 38, 133, .24), inset 0 1px 0 rgba(255, 255, 255, .09);
+    }
+
+    .option-pill.active::after {
+      position: absolute;
+      top: 9px;
+      right: 9px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #c2b5ff;
+      box-shadow: 0 0 0 3px rgba(194, 181, 255, .15);
+      content: "";
+    }
+
+    .option-icon {
+      display: grid;
+      width: 27px;
+      height: 27px;
+      place-items: center;
+      border-radius: 8px;
+      color: #a99aff;
+      background: rgba(152, 133, 255, .13);
+    }
+
+    .option-pill.active .option-icon { color: #fff; background: rgba(190, 178, 255, .22); }
+    .option-icon svg { width: 16px; height: 16px; fill: currentColor; }
+    .option-copy { min-width: 0; }
+
+    .option-pill .pill-label {
+      display: block;
+      color: var(--ink);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: -.01em;
+      line-height: 1.2;
+    }
+
+    .option-pill .pill-desc {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 9.5px;
+      font-weight: 500;
+      line-height: 1.25;
+    }
+
+    .output-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 18px;
+      padding: 10px 11px 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: rgba(20, 23, 34, .72);
+    }
+
+    .output-copy { min-width: 0; }
+
+    .output-copy #outputLabel {
+      display: block;
+      color: var(--ink);
+      font-size: 11px;
+      font-weight: 680;
+    }
+
+    .output-copy p {
+      margin: 3px 0 0;
+      color: var(--subtle);
+      font-size: 9.5px;
+      font-weight: 500;
+    }
+
+    .toggle-group {
+      display: flex;
+      flex: 0 0 auto;
+      gap: 3px;
+      padding: 3px;
+      border: 1px solid rgba(255, 255, 255, .07);
+      border-radius: 9px;
+      background: #10131d;
+    }
+
+    .toggle-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 27px;
+      padding: 0 8px;
+      cursor: pointer;
+      color: var(--muted);
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      font-size: 10px;
+      font-weight: 680;
+      transition: background .18s ease, color .18s ease, box-shadow .18s ease;
+    }
+
+    .toggle-btn svg { width: 12px; height: 12px; fill: currentColor; }
+    .toggle-btn:hover { color: var(--ink); background: rgba(255, 255, 255, .06); }
+
+    .toggle-btn.active {
+      color: #fff;
+      background: linear-gradient(135deg, #8068ff, #9257ed);
+      box-shadow: 0 3px 9px rgba(100, 76, 235, .31);
+    }
+
+    .btn-capture {
+      position: relative;
+      display: flex;
+      width: 100%;
+      min-height: 51px;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      overflow: hidden;
+      padding: 13px 16px;
+      cursor: pointer;
+      color: #fff;
+      border: 1px solid rgba(220, 211, 255, .25);
+      border-radius: 14px;
+      background: linear-gradient(105deg, #745bff 0%, #8a5aff 45%, #ad49f2 100%);
+      box-shadow: 0 12px 25px rgba(99, 66, 245, .29), inset 0 1px 0 rgba(255, 255, 255, .25);
+      font-size: 13px;
+      font-weight: 750;
+      letter-spacing: -.01em;
+      transition: filter .18s ease, transform .18s ease, box-shadow .18s ease;
+    }
+
+    .btn-capture::before {
+      position: absolute;
+      top: 0;
+      left: -45%;
+      width: 44%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .2), transparent);
+      content: "";
+      transform: skewX(-20deg);
+      transition: left .45s ease;
+    }
+
+    .btn-capture:hover { filter: brightness(1.07); transform: translateY(-1px); box-shadow: 0 16px 30px rgba(99, 66, 245, .38), inset 0 1px 0 rgba(255, 255, 255, .26); }
+    .btn-capture:hover::before { left: 110%; }
+    .btn-capture:active { transform: translateY(0); }
+    .btn-capture:disabled { cursor: not-allowed; filter: saturate(.55); opacity: .58; transform: none; }
+    .btn-capture svg { width: 18px; height: 18px; fill: currentColor; }
+
+    .option-pill:focus-visible,
+    .toggle-btn:focus-visible,
+    .btn-capture:focus-visible {
+      outline: 2px solid #c1b5ff;
+      outline-offset: 3px;
+    }
+
+    .progress-wrap { display: none; margin-top: 13px; }
+    .progress-wrap.visible { display: block; }
+
+    .progress-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 7px;
+    }
+
+    .progress-label { color: var(--muted); font-size: 10px; font-weight: 600; }
+    .progress-pct { color: #bbaeff; font-size: 10px; font-weight: 750; }
+    .progress-bar { height: 5px; overflow: hidden; border-radius: 999px; background: #24293a; }
+
+    .progress-fill {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #8068ff, #b850f0);
+      box-shadow: 0 0 10px rgba(155, 91, 255, .9);
+      transition: width .3s ease;
+    }
+
+    .toast {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      padding: 10px 11px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 650;
+    }
+
+    .toast.visible { display: flex; }
+    .toast.success { color: var(--success); border: 1px solid rgba(84, 213, 165, .22); background: rgba(84, 213, 165, .09); }
+    .toast.error { color: var(--danger); border: 1px solid rgba(255, 116, 136, .23); background: rgba(255, 116, 136, .09); }
+    .toast svg { width: 14px; height: 14px; flex: 0 0 auto; fill: currentColor; }
+
+    .footer {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 12px 20px 15px;
+      color: var(--subtle);
+      font-size: 10px;
+      font-weight: 540;
+    }
+
+    .footer::before {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: #65d5aa;
+      box-shadow: 0 0 0 3px rgba(101, 213, 170, .09);
+      content: "";
+    }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M6 4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9.5L14.5 4H6Zm8 1.8L18.2 10H15a1 1 0 0 1-1-1V5.8ZM8 13h8v1.5H8V13Zm0 3h5v1.5H8V16Z"/></svg>
+    </div>
+    <div class="header-text">
+      <h1>FullSnap</h1>
+      <p>Capture any page in one clean image</p>
+    </div>
+  </header>
+
+  <main class="body">
+    <section class="page-info" aria-label="Current page">
+      <div class="favicon-wrap"><img id="favicon" alt="" hidden /></div>
+      <div class="info-text">
+        <div class="info-title" id="pageTitle">Loading...</div>
+        <div class="info-url" id="pageUrl"></div>
+      </div>
+    </section>
+
+    <span class="section-label">Capture mode</span>
+    <section class="options-grid" role="group" aria-label="Capture mode">
+      <button class="option-pill active" type="button" data-mode="full" aria-pressed="true">
+        <span class="option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 3h10.8L20 7.2V21H5V3Zm10 1.8V8h3.2L15 4.8ZM8 11h8v1.5H8V11Zm0 3.5h8V16H8v-1.5Z"/></svg></span>
+        <span class="option-copy"><span class="pill-label">Full page</span><span class="pill-desc">Everything on page</span></span>
+      </button>
+      <button class="option-pill" type="button" data-mode="select" aria-pressed="false">
+        <span class="option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 4h5v2H6v3H4V4Zm11 0h5v5h-2V6h-3V4ZM4 15h2v3h3v2H4v-5Zm14 0h2v5h-5v-2h3v-3ZM8 8h8v8H8V8Zm2 2v4h4v-4h-4Z"/></svg></span>
+        <span class="option-copy"><span class="pill-label">Select area</span><span class="pill-desc">Choose a region</span></span>
+      </button>
+      <button class="option-pill" type="button" data-mode="visible" aria-pressed="false">
+        <span class="option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Zm0 2v10h16V7H4Zm2 8 3-4 2.1 2.6L14 10l4 5H6Z"/></svg></span>
+        <span class="option-copy"><span class="pill-label">Visible</span><span class="pill-desc">Current viewport</span></span>
+      </button>
+    </section>
+
+    <section class="output-card" aria-labelledby="chromeLabel">
+      <div class="output-copy">
+        <span id="chromeLabel">Page chrome</span>
+        <p>Headers, footers, and sticky bars</p>
+      </div>
+      <div class="toggle-group" role="group" aria-labelledby="chromeLabel">
+        <button class="toggle-btn active" type="button" data-chrome="clean" aria-pressed="true">Clean</button>
+        <button class="toggle-btn" type="button" data-chrome="original" aria-pressed="false">Original</button>
+      </div>
+    </section>
+
+    <section class="output-card" aria-labelledby="outputLabel">
+      <div class="output-copy">
+        <span id="outputLabel">Save destination</span>
+        <p>Choose where the image goes</p>
+      </div>
+      <div class="toggle-group" role="group" aria-labelledby="outputLabel">
+        <button class="toggle-btn active" type="button" data-output="clipboard" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6v2h3v16H6V5h3V3Zm2 2v2h2V5h-2Zm-3 2v12h8V7h-1v2h-6V7H8Z"/></svg>Clipboard</button>
+        <button class="toggle-btn" type="button" data-output="file" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h11l3 3v15H5V3Zm10 2.2V8h2.8L15 5.2ZM8 12h8v1.5H8V12Zm0 3h8v1.5H8V15Z"/></svg>PNG</button>
+      </div>
+    </section>
+
+    <button class="btn-capture" id="btnCapture" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5 9.5 3h5L16 5h3a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h3Zm4 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0-1.7a2.3 2.3 0 1 1 0-4.6 2.3 2.3 0 0 1 0 4.6Z"/></svg>
+      <span id="btnLabel">Copy to Clipboard</span>
+    </button>
+
+    <div class="progress-wrap" id="progressWrap">
+      <div class="progress-header">
+        <span class="progress-label" id="progressLabel">Capturing tiles...</span>
+        <span class="progress-pct" id="progressPct">0%</span>
+      </div>
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite">
+      <svg id="toastIcon" viewBox="0 0 24 24"></svg>
+      <span id="toastMsg"></span>
+    </div>
+  </main>
+
+  <footer class="footer">Private capture, processed locally</footer>
+  <script src="popup.js"></script>
+</body>
+</html>
