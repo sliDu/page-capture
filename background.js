@@ -11,6 +11,9 @@
 //   5. Restore hidden elements & original scroll position.
 //   6. Copy through the focused popup/page or save as a PNG file.
 //
+// Select area: drag a rectangle on the current viewport, capture once, crop.
+// Clean/Original chrome stripping does not apply — the crop is what is on screen.
+//
 // Rate-limit safety: Chrome/Brave caps captureVisibleTab at 2 calls/sec.
 // We enforce ≥ 600ms gaps + retry with exponential back-off.
 
@@ -68,20 +71,17 @@ async function captureTab(tabId, mode, output, includeChrome = false) {
     await restoreCaptureState(tabId);
 
     if (isSelect) {
-      notifyPopup(5, 'Select an area on the page...');
-      await selectScrollContainer(tabId);
+      return captureSelectedRegion(tabId, output, tab.windowId);
     }
-
     if (mode === 'visible') {
-      return captureVisibleOnly(tabId, output, tab.windowId, isSelect, includeChrome);
+      return captureVisibleOnly(tabId, output, tab.windowId, includeChrome);
     }
-    return captureFullPage(tabId, output, tab.windowId, isSelect, includeChrome);
+    return captureFullPage(tabId, output, tab.windowId, includeChrome);
   } catch (err) {
     failure = err;
     throw err;
   } finally {
-    // The popup closes when an area is clicked, so cleanup must be independent
-    // of it.  This also makes cancellation and any capture error non-destructive.
+    // The popup closes before area capture, so cleanup must be independent of it.
     await restoreCaptureState(tabId).catch(() => {});
     if (isSelect && failure && failure.message !== 'Area selection cancelled') {
       await showPageNotice(tabId, failure.message, 'error');
@@ -90,214 +90,311 @@ async function captureTab(tabId, mode, output, includeChrome = false) {
   }
 }
 
-// ── Manual Selection ──────────────────────────────────────────────────────────
-async function selectScrollContainer(tabId) {
+// ── Area selection (viewport crop) ────────────────────────────────────────────
+async function captureSelectedRegion(tabId, output, windowId) {
+  notifyPopup(5, 'Select an area on the page...');
+  const selection = await selectAreaRect(tabId);
+
+  notifyPopup(40, 'Capturing selection…');
+  await notifyPage(tabId, 40, 'Capturing selection…');
+  await sleep(80);
+
+  const dataUrl = await captureWithRetry(tabId, windowId, {
+    hideUi: true,
+    includeChrome: true,
+  });
+
+  notifyPopup(75, 'Cropping selection…');
+  await notifyPage(tabId, 75, 'Cropping selection…');
+  const bitmap = await dataUrlToBitmap(dataUrl);
+  try {
+    const blob = await cropBitmapToRect(bitmap, selection);
+    notifyPopup(95, output === 'clipboard' ? 'Preparing clipboard…' : 'Saving PNG…');
+    await notifyPage(tabId, 95, 'Finalizing image…');
+    return outputResult(blob, output, true, tabId);
+  } finally {
+    bitmap.close();
+  }
+}
+
+async function selectAreaRect(tabId) {
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
-    func: () => {
-      return new Promise((resolve, reject) => {
-        // Replacing an unfinished selection must also resolve its old promise;
-        // otherwise its service-worker capture remains locked forever.
-        window.__fs_cancelSelection?.();
-        document.getElementById('fs-selection-highlight')?.remove();
+    func: () => new Promise((resolve) => {
+      // Replacing an unfinished selection must also resolve its old promise;
+      // otherwise its service-worker capture remains locked forever.
+      window.__fs_cancelSelection?.();
+      document.getElementById('fs-select-root')?.remove();
+      document.getElementById('fs-selection-highlight')?.remove();
 
-        let currentHover = null;
-        let finished = false;
-        const highlight = document.createElement('div');
-        highlight.id = 'fs-selection-highlight';
-        Object.assign(highlight.style, {
-          position: 'fixed', pointerEvents: 'none', zIndex: '2147483647',
-          border: '3px solid #6c63ff', background: 'rgba(108, 99, 255, 0.10)',
-          boxSizing: 'border-box', display: 'none',
+      const MIN_SIZE = 8;
+      let finished = false;
+      let dragging = false;
+      let startX = 0;
+      let startY = 0;
+
+      const root = document.createElement('div');
+      root.id = 'fs-select-root';
+      root.setAttribute('data-fs-ui', '');
+      root.style.cssText = [
+        'display: block',
+        'position: fixed',
+        'top: 0',
+        'right: 0',
+        'bottom: 0',
+        'left: 0',
+        'width: auto',
+        'height: auto',
+        'margin: 0',
+        'padding: 0',
+        'border: 0',
+        'background: transparent',
+        'overflow: hidden',
+        'z-index: 2147483647',
+        'cursor: crosshair',
+        'pointer-events: auto',
+        'user-select: none',
+        'touch-action: none',
+        'transform: none',
+        'filter: none',
+        'isolation: isolate',
+      ].map((rule) => `${rule} !important`).join(';');
+
+      const shadow = root.attachShadow({ mode: 'closed' });
+      const style = document.createElement('style');
+      style.textContent = [
+        ':host { display: block; }',
+        '* { box-sizing: border-box; }',
+        '.dim { position: absolute; background: rgba(8, 10, 18, 0.55); pointer-events: none; }',
+        '.box { position: absolute; display: none; pointer-events: none; outline: 2px solid #9b87ff;',
+        '  box-shadow: 0 0 0 1px rgba(0,0,0,.4); }',
+        '.hint, .size { position: absolute; pointer-events: none; color: #f7f8ff;',
+        '  font-family: system-ui, sans-serif; white-space: nowrap; }',
+        '.hint { top: 20px; left: 50%; transform: translateX(-50%); padding: 8px 14px;',
+        '  border: 1px solid rgba(255,255,255,.12); border-radius: 999px;',
+        '  background: rgba(15, 18, 28, 0.94); box-shadow: 0 10px 28px rgba(0,0,0,.35);',
+        '  font-size: 12px; font-weight: 650; }',
+        '.size { display: none; padding: 3px 7px; border-radius: 6px; background: #8068ff;',
+        '  font-size: 11px; font-weight: 700; }',
+      ].join('\n');
+
+      const dimTop = document.createElement('div');
+      const dimLeft = document.createElement('div');
+      const dimRight = document.createElement('div');
+      const dimBottom = document.createElement('div');
+      const box = document.createElement('div');
+      const hint = document.createElement('div');
+      const size = document.createElement('div');
+      dimTop.className = 'dim';
+      dimLeft.className = 'dim';
+      dimRight.className = 'dim';
+      dimBottom.className = 'dim';
+      box.className = 'box';
+      hint.className = 'hint';
+      size.className = 'size';
+      hint.textContent = 'Drag to select an area · Esc to cancel';
+      shadow.append(style, dimTop, dimLeft, dimRight, dimBottom, box, hint, size);
+      document.documentElement.appendChild(root);
+
+      const layout = (rect) => {
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        if (!rect) {
+          dimTop.style.cssText = `position:absolute;left:0;top:0;width:${vw}px;height:${vh}px;`;
+          dimLeft.style.cssText = 'display:none';
+          dimRight.style.cssText = 'display:none';
+          dimBottom.style.cssText = 'display:none';
+          box.style.display = 'none';
+          size.style.display = 'none';
+          return;
+        }
+        const { left, top, width, height } = rect;
+        dimTop.style.cssText = `position:absolute;left:0;top:0;width:${vw}px;height:${top}px;`;
+        dimLeft.style.cssText = `position:absolute;left:0;top:${top}px;width:${left}px;height:${height}px;`;
+        dimRight.style.cssText = `position:absolute;left:${left + width}px;top:${top}px;width:${Math.max(0, vw - left - width)}px;height:${height}px;`;
+        dimBottom.style.cssText = `position:absolute;left:0;top:${top + height}px;width:${vw}px;height:${Math.max(0, vh - top - height)}px;`;
+        box.style.cssText = `display:block;position:absolute;left:${left}px;top:${top}px;width:${width}px;height:${height}px;`;
+        size.style.display = 'block';
+        size.textContent = `${Math.round(width)} × ${Math.round(height)}`;
+        size.style.left = `${Math.min(left, Math.max(0, vw - 88))}px`;
+        size.style.top = `${Math.min(top + height + 8, vh - 24)}px`;
+      };
+
+      const normRect = (x0, y0, x1, y1) => {
+        const left = Math.max(0, Math.min(x0, x1));
+        const top = Math.max(0, Math.min(y0, y1));
+        const right = Math.min(window.innerWidth, Math.max(x0, x1));
+        const bottom = Math.min(window.innerHeight, Math.max(y0, y1));
+        return {
+          left,
+          top,
+          width: Math.max(0, right - left),
+          height: Math.max(0, bottom - top),
+        };
+      };
+
+      const cleanup = () => {
+        root.removeEventListener('pointerdown', onPointerDown, true);
+        root.removeEventListener('pointermove', onPointerMove, true);
+        root.removeEventListener('pointerup', onPointerUp, true);
+        root.removeEventListener('pointercancel', onPointerUp, true);
+        root.removeEventListener('wheel', onWheel, true);
+        root.removeEventListener('click', swallowEvent, true);
+        document.removeEventListener('keydown', onKeyDown, true);
+        document.removeEventListener('contextmenu', onContextMenu, true);
+        document.removeEventListener('click', swallowEvent, true);
+        document.removeEventListener('mousedown', swallowEvent, true);
+        document.removeEventListener('mouseup', swallowEvent, true);
+        document.removeEventListener('dblclick', swallowEvent, true);
+        document.removeEventListener('auxclick', swallowEvent, true);
+        root.remove();
+        window.__fs_cancelSelection = null;
+      };
+
+      const finish = (value) => {
+        if (finished) return;
+        finished = true;
+        dragging = false;
+        // Keep the overlay up through the leftover click so it does not hit the page.
+        setTimeout(() => {
+          cleanup();
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve(value)));
+        }, 50);
+      };
+
+      function onWheel(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!dragging) window.scrollBy(e.deltaX, e.deltaY);
+      }
+
+      function swallowEvent(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      }
+
+      function onContextMenu(e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+
+      function onKeyDown(e) {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        finish(null);
+      }
+
+      function onPointerDown(e) {
+        if (e.button !== 0 || finished) return;
+        e.preventDefault();
+        e.stopPropagation();
+        dragging = true;
+        startX = e.clientX;
+        startY = e.clientY;
+        try { root.setPointerCapture(e.pointerId); } catch (_) {}
+        hint.style.visibility = 'hidden';
+        layout(normRect(startX, startY, startX, startY));
+      }
+
+      function onPointerMove(e) {
+        if (!dragging || finished) return;
+        e.preventDefault();
+        layout(normRect(startX, startY, e.clientX, e.clientY));
+      }
+
+      function onPointerUp(e) {
+        if (!dragging || finished) return;
+        dragging = false;
+        e.preventDefault();
+        e.stopPropagation();
+        try { root.releasePointerCapture(e.pointerId); } catch (_) {}
+        const rect = normRect(startX, startY, e.clientX, e.clientY);
+        if (rect.width < MIN_SIZE || rect.height < MIN_SIZE) {
+          hint.style.visibility = 'visible';
+          hint.textContent = 'Drag to select an area · Esc to cancel';
+          layout(null);
+          return;
+        }
+        finish({
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
         });
-        document.documentElement.appendChild(highlight);
+      }
 
-        const parentElement = (el) => {
-          if (el?.parentElement) return el.parentElement;
-          const root = el?.getRootNode?.();
-          return root?.host || null;
-        };
-
-        const isScrollable = (el) => {
-          if (!(el instanceof Element) || el.scrollHeight <= el.clientHeight + 1 || el.clientHeight <= 0) return false;
-          const overflow = getComputedStyle(el).overflowY;
-          if (!['auto', 'scroll', 'overlay', 'hidden'].includes(overflow)) return false;
-          const rect = el.getBoundingClientRect();
-          return rect.width > 1 && rect.height > 1 && rect.bottom > 0 && rect.top < window.innerHeight;
-        };
-
-        function findScrollableAncestor(el) {
-          while (el && el !== document.body && el !== document.documentElement) {
-            if (isScrollable(el)) return el;
-            el = parentElement(el);
-          }
-          return window;
-        }
-
-        function showHighlight(el) {
-          const rect = el === window
-            ? { top: 0, left: 0, width: window.innerWidth, height: window.innerHeight }
-            : el.getBoundingClientRect();
-          Object.assign(highlight.style, {
-            display: 'block', top: `${Math.max(0, rect.top)}px`, left: `${Math.max(0, rect.left)}px`,
-            width: `${Math.max(0, Math.min(rect.width, window.innerWidth - Math.max(0, rect.left)))}px`,
-            height: `${Math.max(0, Math.min(rect.height, window.innerHeight - Math.max(0, rect.top)))}px`,
-          });
-        }
-
-        function cleanUpSelection() {
-          document.removeEventListener('mousemove', onMouseMove, true);
-          document.removeEventListener('click', onClick, true);
-          document.removeEventListener('keydown', onKeyDown, true);
-          highlight.remove();
-          window.__fs_cancelSelection = null;
-        }
-
-        function finish(value) {
-          if (finished) return;
-          finished = true;
-          cleanUpSelection();
-          resolve(value);
-        }
-
-        function fail(err) {
-          if (finished) return;
-          finished = true;
-          cleanUpSelection();
-          reject(err);
-        }
-
-        function getEventElement(e) {
-          const path = e.composedPath?.() || [];
-          return path.find((node) => node instanceof Element)
-            || document.elementFromPoint(e.clientX, e.clientY);
-        }
-
-        function onMouseMove(e) {
-          const target = getEventElement(e);
-          const scrollable = findScrollableAncestor(target);
-          if (currentHover !== scrollable) {
-            currentHover = scrollable;
-            showHighlight(currentHover);
-          }
-        }
-
-        function onClick(e) {
-          e.preventDefault();
-          e.stopPropagation();
-          try {
-            // Do not rely only on mousemove: clicking straight after opening
-            // the popup previously used a stale/null hover target and captured
-            // the whole page instead of the element under the pointer.
-            const sc = findScrollableAncestor(getEventElement(e));
-            window.__fs_scrollContainer = sc;
-
-            if (sc !== window) {
-              // A transformed ancestor makes a fixed descendant relative to that
-              // ancestor instead of the viewport. Only neutralize properties
-              // that create that containing block.
-              window.__fs_neutralizedAncestors = [];
-              let parent = parentElement(sc);
-              while (parent && parent !== document.documentElement) {
-                const cs = window.getComputedStyle(parent);
-                const properties = [
-                  ['transform', cs.transform !== 'none', 'none'],
-                  ['perspective', cs.perspective !== 'none', 'none'],
-                  ['filter', cs.filter !== 'none', 'none'],
-                  ['backdrop-filter', cs.backdropFilter !== 'none', 'none'],
-                  ['contain', cs.contain !== 'none', 'none'],
-                  ['will-change', cs.willChange.includes('transform'), 'auto'],
-                ].filter(([, shouldReset]) => shouldReset);
-                if (properties.length) {
-                  const styles = properties.map(([property]) => [
-                    property,
-                    parent.style.getPropertyValue(property),
-                    parent.style.getPropertyPriority(property),
-                  ]);
-                  window.__fs_neutralizedAncestors.push({ el: parent, styles });
-                  for (const [property, , resetValue] of properties) {
-                    parent.style.setProperty(property, resetValue, 'important');
-                  }
-                }
-                parent = parentElement(parent);
-              }
-
-              const properties = [
-                'position', 'top', 'right', 'bottom', 'left', 'width', 'height', 'z-index',
-                'max-width', 'max-height', 'margin', 'transform', 'background-color',
-                'box-sizing', 'isolation', 'scroll-behavior',
-              ];
-              window.__fs_selectedContainerState = {
-                el: sc,
-                styles: properties.map((property) => [
-                  property,
-                  sc.style.getPropertyValue(property),
-                  sc.style.getPropertyPriority(property),
-                ]),
-              };
-
-              const cs = window.getComputedStyle(sc);
-              const needsBg = cs.backgroundColor === 'rgba(0, 0, 0, 0)' || cs.backgroundColor === 'transparent';
-              if (needsBg) {
-                const bodyBg = window.getComputedStyle(document.body).backgroundColor;
-                sc.style.setProperty(
-                  'background-color',
-                  bodyBg && bodyBg !== 'rgba(0, 0, 0, 0)' && bodyBg !== 'transparent' ? bodyBg : '#fff',
-                  'important',
-                );
-              }
-
-              sc.style.setProperty('position', 'fixed', 'important');
-              sc.style.setProperty('top', '0', 'important');
-              sc.style.setProperty('right', '0', 'important');
-              sc.style.setProperty('bottom', '0', 'important');
-              sc.style.setProperty('left', '0', 'important');
-              sc.style.setProperty('width', '100vw', 'important');
-              sc.style.setProperty('height', '100vh', 'important');
-              sc.style.setProperty('z-index', '2147483647', 'important');
-              sc.style.setProperty('max-width', 'none', 'important');
-              sc.style.setProperty('max-height', 'none', 'important');
-              sc.style.setProperty('margin', '0', 'important');
-              sc.style.setProperty('transform', 'none', 'important');
-              sc.style.setProperty('box-sizing', 'border-box', 'important');
-              sc.style.setProperty('isolation', 'isolate', 'important');
-            }
-
-            finish(true);
-          } catch (err) {
-            fail(err);
-          }
-        }
-
-        function onKeyDown(e) {
-          if (e.key !== 'Escape') return;
-          e.preventDefault();
-          finish(false);
-        }
-
-        window.__fs_cancelSelection = () => finish(false);
-        document.addEventListener('mousemove', onMouseMove, true);
-        document.addEventListener('click', onClick, true);
-        document.addEventListener('keydown', onKeyDown, true);
-      });
-    }
+      window.__fs_cancelSelection = () => finish(null);
+      layout(null);
+      root.addEventListener('pointerdown', onPointerDown, true);
+      root.addEventListener('pointermove', onPointerMove, true);
+      root.addEventListener('pointerup', onPointerUp, true);
+      root.addEventListener('pointercancel', onPointerUp, true);
+      root.addEventListener('wheel', onWheel, { capture: true, passive: false });
+      root.addEventListener('click', swallowEvent, true);
+      document.addEventListener('keydown', onKeyDown, true);
+      document.addEventListener('contextmenu', onContextMenu, true);
+      document.addEventListener('click', swallowEvent, true);
+      document.addEventListener('mousedown', swallowEvent, true);
+      document.addEventListener('mouseup', swallowEvent, true);
+      document.addEventListener('dblclick', swallowEvent, true);
+      document.addEventListener('auxclick', swallowEvent, true);
+    }),
   });
   if (!result) throw new Error('Area selection cancelled');
+  return result;
+}
+
+function cropBitmapToRect(bitmap, selection) {
+  const viewportWidth = Number(selection?.viewportWidth);
+  const viewportHeight = Number(selection?.viewportHeight);
+  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0
+    || !Number.isFinite(viewportHeight) || viewportHeight <= 0) {
+    throw new Error('The selected area could not be measured');
+  }
+
+  const scaleX = bitmap.width / viewportWidth;
+  const scaleY = bitmap.height / viewportHeight;
+  if (!Number.isFinite(scaleX) || scaleX <= 0 || !Number.isFinite(scaleY) || scaleY <= 0) {
+    throw new Error('The captured image could not be cropped');
+  }
+
+  let sx = Math.round(Number(selection.left) * scaleX);
+  let sy = Math.round(Number(selection.top) * scaleY);
+  let sw = Math.round(Number(selection.width) * scaleX);
+  let sh = Math.round(Number(selection.height) * scaleY);
+
+  sx = Math.min(Math.max(0, sx), Math.max(0, bitmap.width - 1));
+  sy = Math.min(Math.max(0, sy), Math.max(0, bitmap.height - 1));
+  sw = Math.min(Math.max(1, sw), bitmap.width - sx);
+  sh = Math.min(Math.max(1, sh), bitmap.height - sy);
+
+  if (sw > MAX_CANVAS_DIMENSION || sh > MAX_CANVAS_DIMENSION || sw * sh > MAX_CANVAS_PIXELS) {
+    throw new Error('The captured image is too large for the browser to create safely');
+  }
+
+  const canvas = new OffscreenCanvas(sw, sh);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Unable to prepare the screenshot image');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+  return canvas.convertToBlob({ type: 'image/png' });
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 //  FULL-PAGE CAPTURE
 // ────────────────────────────────────────────────────────────────────────────
-async function captureFullPage(tabId, output, windowId, isSelect, includeChrome = false) {
+async function captureFullPage(tabId, output, windowId, includeChrome = false) {
   let pagePrepared = false;
 
   try {
     notifyPopup(8, 'Measuring page…');
-    if (isSelect) await notifyPage(tabId, 8, 'Measuring page…');
     const { viewportHeight } = await getPageMetrics(tabId);
 
     notifyPopup(12, 'Preparing page…');
-    if (isSelect) await notifyPage(tabId, 12, 'Preparing page…');
     await prepareCapturePage(tabId, includeChrome);
     pagePrepared = true;
     await sleep(SCROLL_SETTLE_MS);
@@ -331,10 +428,8 @@ async function captureFullPage(tabId, output, windowId, isSelect, includeChrome 
 
       const pct = 15 + Math.min(60, Math.round((i / Math.max(1, numTiles)) * 60));
       notifyPopup(pct, `Capturing tile ${i + 1}…`);
-      if (isSelect) await notifyPage(tabId, pct, `Capturing tile ${i + 1}…`);
 
       const dataUrl = await captureWithRetry(tabId, windowId, {
-        hideUi: isSelect,
         hideHeaders: !includeChrome,
         hideFixed: !includeChrome,
         includeChrome,
@@ -346,12 +441,10 @@ async function captureFullPage(tabId, output, windowId, isSelect, includeChrome 
 
     const capturedScrollHeight = await getScrollHeight(tabId);
     notifyPopup(78, 'Restoring page…');
-    if (isSelect) await notifyPage(tabId, 78, 'Restoring page…');
     await restoreCaptureState(tabId);
     pagePrepared = false;
 
     notifyPopup(82, 'Stitching tiles…');
-    if (isSelect) await notifyPage(tabId, 82, 'Stitching tiles…');
     if (!tiles.length) throw new Error('No screenshot tiles were captured');
 
     const firstBitmap = await dataUrlToBitmap(tiles[0].dataUrl);
@@ -378,7 +471,6 @@ async function captureFullPage(tabId, output, windowId, isSelect, includeChrome 
       const tile = tiles[t];
       const spct = 82 + Math.round((t / tiles.length) * 12);
       notifyPopup(spct, 'Stitching tiles…');
-      if (isSelect) await notifyPage(tabId, spct, 'Stitching tiles…');
 
       const bitmap = t === 0 ? firstBitmap : await dataUrlToBitmap(tile.dataUrl);
       const nextScrollY = t + 1 < tiles.length ? tiles[t + 1].scrollY : pageHeight;
@@ -395,8 +487,7 @@ async function captureFullPage(tabId, output, windowId, isSelect, includeChrome 
     }
 
     notifyPopup(95, output === 'clipboard' ? 'Preparing clipboard…' : 'Saving PNG…');
-    if (isSelect) await notifyPage(tabId, 95, 'Finalizing image…');
-    return outputResult(await canvas.convertToBlob({ type: 'image/png' }), output, isSelect, tabId);
+    return outputResult(await canvas.convertToBlob({ type: 'image/png' }), output, false, tabId);
   } finally {
     if (pagePrepared) await restoreCaptureState(tabId).catch(() => {});
   }
@@ -465,20 +556,17 @@ async function restoreCaptureState(tabId) {
 // ────────────────────────────────────────────────────────────────────────────
 //  VISIBLE-AREA CAPTURE
 // ────────────────────────────────────────────────────────────────────────────
-async function captureVisibleOnly(tabId, output, windowId, isSelect, includeChrome = false) {
+async function captureVisibleOnly(tabId, output, windowId, includeChrome = false) {
   notifyPopup(40, 'Capturing viewport…');
-  if (isSelect) await notifyPage(tabId, 40, 'Capturing viewport…');
   if (!includeChrome) await hideFootersInTab(tabId);
   await sleep(SCROLL_SETTLE_MS);
   const dataUrl = await captureWithRetry(tabId, windowId, {
-    hideUi: isSelect,
     includeChrome,
   });
 
   notifyPopup(80, output === 'clipboard' ? 'Preparing clipboard…' : 'Saving PNG…');
-  if (isSelect) await notifyPage(tabId, 80, 'Finalizing image…');
   const blob = await dataUrlToBlob(dataUrl);
-  return outputResult(blob, output, isSelect, tabId);
+  return outputResult(blob, output, false, tabId);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -537,6 +625,7 @@ async function showPageNotice(tabId, message, type) {
     await injectScript(tabId, (text, noticeType) => {
       document.getElementById('fs-page-progress')?.remove();
       document.getElementById('fs-page-notice')?.remove();
+      document.getElementById('fs-select-root')?.remove();
 
       const notice = document.createElement('div');
       notice.id = 'fs-page-notice';
@@ -771,7 +860,7 @@ function markFooterElements() {
 
   const isOwnUi = (el) => {
     const id = el?.id || '';
-    return id === 'fs-page-progress' || id === 'fs-page-notice' || id === 'fs-selection-highlight';
+    return id.startsWith('fs-') || el?.hasAttribute?.('data-fs-ui');
   };
 
   const selectedLineage = new Set();
@@ -1014,6 +1103,7 @@ function restorePageAfterCapture() {
   }
 
   window.__fs_cancelSelection?.();
+  document.getElementById('fs-select-root')?.remove();
   document.getElementById('fs-selection-highlight')?.remove();
 
   for (const state of window.__fs_captureUi || []) restoreStyle({
@@ -1062,7 +1152,7 @@ function restorePageAfterCapture() {
  * is not captured. Waits two animation frames after hiding so the paint lands.
  */
 function setCaptureUiHidden(hidden) {
-  const ids = ['fs-page-progress', 'fs-page-notice', 'fs-selection-highlight'];
+  const ids = ['fs-page-progress', 'fs-page-notice', 'fs-selection-highlight', 'fs-select-root'];
   if (hidden) {
     window.__fs_captureUi = [];
     for (const id of ids) {

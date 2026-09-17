@@ -22,6 +22,8 @@ const progressLabel = document.getElementById('progressLabel');
 const toast = document.getElementById('toast');
 const toastMsg = document.getElementById('toastMsg');
 const toastIcon = document.getElementById('toastIcon');
+const chromeCard = document.getElementById('chromeCard');
+const chromeHint = document.getElementById('chromeHint');
 const modeButtons = [...document.querySelectorAll('[data-mode]')];
 const outputButtons = [...document.querySelectorAll('[data-output]')];
 const chromeButtons = [...document.querySelectorAll('[data-chrome]')];
@@ -58,19 +60,43 @@ function setCaptureMode(mode) {
   if (!CAPTURE_MODES.has(mode)) return;
   captureMode = mode;
   setSelectedButton(modeButtons, 'mode', mode);
+  syncChromeAvailability();
+  updateCaptureButtonLabel();
 }
 
 function setCaptureOutput(output) {
   if (!OUTPUT_TYPES.has(output)) return;
   captureOutput = output;
-  btnLabel.textContent = output === 'clipboard' ? 'Copy to Clipboard' : 'Save as PNG';
+  updateCaptureButtonLabel();
   setSelectedButton(outputButtons, 'output', output);
 }
 
 function setChromeMode(mode) {
-  if (!CHROME_MODES.has(mode)) return;
+  if (!CHROME_MODES.has(mode) || captureMode === 'select') return;
   chromeMode = mode;
   setSelectedButton(chromeButtons, 'chrome', mode);
+}
+
+function updateCaptureButtonLabel() {
+  if (captureMode === 'select') {
+    btnLabel.textContent = captureOutput === 'clipboard' ? 'Select & copy' : 'Select & save';
+    return;
+  }
+  btnLabel.textContent = captureOutput === 'clipboard' ? 'Copy to Clipboard' : 'Save as PNG';
+}
+
+function syncChromeAvailability() {
+  const disabled = captureMode === 'select';
+  chromeCard.classList.toggle('is-disabled', disabled);
+  chromeCard.toggleAttribute('inert', disabled);
+  chromeCard.setAttribute('aria-disabled', String(disabled));
+  chromeButtons.forEach((button) => {
+    button.disabled = disabled;
+  });
+  chromeHint.textContent = disabled
+    ? 'Not used for area capture'
+    : 'Headers, footers, and sticky bars';
+  chromeCard.title = disabled ? 'Clean/Original does not apply to area capture' : '';
 }
 
 function setSelectedButton(buttons, dataName, selectedValue) {
@@ -104,21 +130,31 @@ function showToast(type, message) {
 async function startCapture() {
   btnCapture.disabled = true;
   toast.classList.remove('visible');
-  setProgress(5, 'Preparing capture...');
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) throw new Error('No active tab found');
     if (!isCapturableUrl(tab.url)) throw new Error('Cannot capture this browser page');
 
-    setProgress(15, 'Starting capture...');
-    const result = await chrome.runtime.sendMessage({
+    const payload = {
       type: 'CAPTURE',
       tabId: tab.id,
       mode: captureMode,
       output: captureOutput,
-      includeChrome: chromeMode === 'original',
-    });
+      includeChrome: captureMode === 'select' ? false : chromeMode === 'original',
+    };
+
+    // Area capture needs the page, not the popup. Fire the job and close so
+    // the drag overlay is visible; the service worker finishes on its own.
+    if (captureMode === 'select') {
+      chrome.runtime.sendMessage(payload).catch(() => {});
+      window.close();
+      return;
+    }
+
+    setProgress(5, 'Preparing capture...');
+    setProgress(15, 'Starting capture...');
+    const result = await chrome.runtime.sendMessage(payload);
 
     if (!result) throw new Error('The capture service did not respond');
     if (result.error) throw new Error(result.error);

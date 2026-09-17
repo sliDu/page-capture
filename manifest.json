@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Page Capture",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "description": "Capture a clean full-page screenshot of any webpage. Copy to clipboard or save as PNG.",
   "permissions": [
     "activeTab",
