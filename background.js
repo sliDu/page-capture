@@ -485,9 +485,12 @@ async function captureFullPage(tabId, output, windowId, includeChrome = false) {
     const metrics = await getPageMetrics(tabId);
     // Stride = rows of CONTENT advance per tile, clamped to what one tile can
     // actually photograph (a container clipped by the viewport bottom shows
-    // fewer rows than its clientHeight). Coverage = full rows the container
-    // can show at its final scroll position, used for bottom-edge sizing.
-    const { stride, coverageHeight, crop } = metrics;
+    // fewer rows than its clientHeight). Reach = content rows covered by the
+    // final tile: the clip offset plus the visible crop height — a
+    // viewport-clipped pane can never photograph its full clientHeight worth
+    // of rows from one scroll position.
+    const { stride, crop, clipOffsetTop } = metrics;
+    const reach = clipOffsetTop + crop.height;
 
     const scrollHeight = await getScrollHeight(tabId);
 
@@ -513,7 +516,7 @@ async function captureFullPage(tabId, output, windowId, includeChrome = false) {
     while (true) {
       if (i >= MAX_TILES) {
         const latestHeight = await getScrollHeight(tabId);
-        if (prevScrollY + coverageHeight < latestHeight - 0.5) {
+        if (prevScrollY + reach < latestHeight - 0.5) {
           throw new Error(`This page needs more than ${MAX_TILES} screenshot tiles`);
         }
         break;
@@ -584,10 +587,11 @@ async function captureFullPage(tabId, output, windowId, includeChrome = false) {
 
       // Never size the canvas beyond what the tiles actually cover: on
       // infinite-scroll pages the height can keep growing right after the
-      // last tile, which would leave a transparent band at the bottom.
-      // The last tile contributes up to coverageHeight rows (its full
-      // clientHeight), which can exceed the stride when tiles overlap.
-      const lastCoverage = tiles[tiles.length - 1].scrollY + coverageHeight;
+      // last tile, which would leave a transparent band at the bottom. The
+      // final tile photographs `reach` content rows from its scroll position
+      // (clip offset + visible crop height) — using clientHeight here would
+      // overestimate exactly when the pane is clipped by the viewport.
+      const lastCoverage = tiles[tiles.length - 1].scrollY + reach;
       const measuredHeight = Math.max(0, capturedScrollHeight || scrollHeight);
       const pageHeight = Math.min(measuredHeight, lastCoverage);
       const canvasW = Math.max(1, Math.round(crop.width * scaleX));
@@ -620,9 +624,12 @@ async function captureFullPage(tabId, output, windowId, includeChrome = false) {
 
         const bitmap = t === 0 ? firstBitmap : await dataUrlToBitmap(tile.dataUrl);
         const nextScrollY = t + 1 < tiles.length ? tiles[t + 1].scrollY : pageHeight;
-        const destY = Math.max(0, Math.round(tile.scrollY * scaleY));
+        // Tile placement in CONTENT coordinates: screen row crop.top shows
+        // content scrollY + clipOffsetTop, so every destination shifts by the
+        // clip offset (0 for unclipped containers and window scrolling).
+        const destY = Math.max(0, Math.round((tile.scrollY + clipOffsetTop) * scaleY));
         const destEnd = t + 1 < tiles.length
-          ? Math.min(canvasH, Math.round(nextScrollY * scaleY))
+          ? Math.min(canvasH, Math.round((nextScrollY + clipOffsetTop) * scaleY))
           : canvasH;
         const drawH = Math.min(bitmap.height - sourceY, Math.max(0, destEnd - destY));
 
@@ -1068,6 +1075,7 @@ async function getPageMetrics(tabId) {
       const vpEl = document.scrollingElement || doc;
       let coverageHeight;
       let scrollHeight;
+      let clipOffsetTop = 0;
       let crop;
       if (isWindow) {
         // clientWidth/Height exclude classic scrollbars, which
@@ -1097,6 +1105,11 @@ async function getPageMetrics(tabId) {
           width: Math.max(1, Math.min(sc.clientWidth, right - left)),
           height: Math.max(1, Math.min(coverageHeight, bottom - top)),
         };
+        // Screen row r shows container content scrollTop + (r - rect.top).
+        // When the pane's top sits above the viewport (rect.top < 0), bitmap
+        // row crop.top shows content scrollTop + clipOffsetTop — the stitcher
+        // must place tiles at that offset or every row lands too high.
+        clipOffsetTop = top - rect.top;
       }
 
       // Stride: advance by no more than the rows visible in one tile, or the
@@ -1108,6 +1121,7 @@ async function getPageMetrics(tabId) {
         scrollHeight: Math.max(scrollHeight, coverageHeight),
         stride,
         coverageHeight,
+        clipOffsetTop,
         crop,
         innerWidth: window.innerWidth,
         innerHeight: window.innerHeight,
