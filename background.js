@@ -131,6 +131,21 @@ async function captureSelectedRegion(tabId, output, windowId) {
   notifyPopup(5, 'Select an area on the page...');
   const selection = await selectAreaRect(tabId);
 
+  if (selection.element) {
+    // Element pick (Windows/OSX snip-style). Fully on screen → crop it
+    // exactly like a rectangle below; extends past the viewport →
+    // scroll-stitch the whole element.
+    const r = selection.rect || {};
+    const fullyVisible = r.left >= 0 && r.top >= 0
+      && r.left + r.width <= selection.viewportWidth
+      && r.top + r.height <= selection.viewportHeight;
+    if (!fullyVisible) return await captureElementRegion(tabId, output, windowId, selection);
+    selection.left = r.left;
+    selection.top = r.top;
+    selection.width = r.width;
+    selection.height = r.height;
+  }
+
   notifyPopup(40, 'Capturing selection…');
   await notifyPage(tabId, 40, 'Capturing selection…');
   // Re-pin the viewport to where the user drew the rectangle: momentum wheel
@@ -243,7 +258,7 @@ async function selectAreaRect(tabId) {
       box.className = 'box';
       hint.className = 'hint';
       size.className = 'size';
-      hint.textContent = 'Drag to select an area · Esc to cancel';
+      hint.textContent = 'Click an element · Drag an area · Esc to cancel';
       shadow.append(style, dimTop, dimLeft, dimRight, dimBottom, box, hint, size);
       document.documentElement.appendChild(root);
 
@@ -282,6 +297,59 @@ async function selectAreaRect(tabId) {
           width: Math.max(0, right - left),
           height: Math.max(0, bottom - top),
         };
+      };
+
+      // ── Element picking (hover highlight + click to capture) ──
+      let hoverEl = null;
+
+      const pickElement = (x, y) => {
+        const stack = typeof document.elementsFromPoint === 'function'
+          ? document.elementsFromPoint(x, y)
+          : [];
+        for (const node of stack) {
+          if (!node || node === root || root.contains(node)) continue;
+          try { if (node.getRootNode?.() === shadow) continue; } catch (_) {}
+          // Never pick our own lingering UI (notices, progress widgets).
+          if (typeof node.id === 'string' && node.id.startsWith('fs-')) continue;
+          if (node.hasAttribute?.('data-fs-ui')) continue;
+          if (node === document.documentElement) continue;
+          return node;
+        }
+        return null;
+      };
+
+      const updateHover = (x, y) => {
+        let el = pickElement(x, y);
+        if (!el) {
+          hoverEl = null;
+          layout(null);
+          return;
+        }
+        // Climb out of sub-minimum inline fragments so clicking a word does
+        // not select a sliver — aim at a container and you get the container.
+        while (el.parentElement && el !== document.body) {
+          const r = el.getBoundingClientRect();
+          if (r.width >= MIN_SIZE && r.height >= MIN_SIZE) break;
+          el = el.parentElement;
+        }
+        hoverEl = el;
+        const r = el.getBoundingClientRect();
+        const left = Math.max(0, r.left);
+        const top = Math.max(0, r.top);
+        const right = Math.min(window.innerWidth, r.right);
+        const bottom = Math.min(window.innerHeight, r.bottom);
+        if (right - left < 1 || bottom - top < 1) {
+          layout(null);
+          hoverEl = null;
+          return;
+        }
+        // Cut the element out of the dimmer (like the drag preview does) so
+        // the picked element shows at full brightness, then label it with
+        // its FULL dimensions even when it partially leaves the viewport.
+        layout({ left, top, width: right - left, height: bottom - top });
+        size.textContent = `${Math.round(r.width)} × ${Math.round(r.height)}`;
+        size.style.left = `${Math.min(left, Math.max(0, window.innerWidth - SIZE_LABEL_MARGIN_X))}px`;
+        size.style.top = `${Math.min(bottom + 8, window.innerHeight - SIZE_LABEL_MARGIN_Y)}px`;
       };
 
       const cleanup = () => {
@@ -344,6 +412,9 @@ async function selectAreaRect(tabId) {
         if (e.button !== 0 || finished) return;
         e.preventDefault();
         e.stopPropagation();
+        // Seed the pick under the press point: touch taps and perfectly
+        // still cursors never fire a hover pointermove first.
+        updateHover(e.clientX, e.clientY);
         dragging = true;
         startX = e.clientX;
         startY = e.clientY;
@@ -353,7 +424,13 @@ async function selectAreaRect(tabId) {
       }
 
       function onPointerMove(e) {
-        if (!dragging || finished) return;
+        if (finished) return;
+        if (!dragging) {
+          // Hover: highlight the element under the pointer so a plain click
+          // can capture it whole.
+          updateHover(e.clientX, e.clientY);
+          return;
+        }
         e.preventDefault();
         layout(normRect(startX, startY, e.clientX, e.clientY));
       }
@@ -365,10 +442,34 @@ async function selectAreaRect(tabId) {
         e.stopPropagation();
         try { root.releasePointerCapture(e.pointerId); } catch (_) {}
         const rect = normRect(startX, startY, e.clientX, e.clientY);
+        const isClick = rect.width < MIN_SIZE && rect.height < MIN_SIZE;
+
+        if (isClick && hoverEl) {
+          const r = hoverEl.getBoundingClientRect();
+          if (r.width >= 1 && r.height >= 1) {
+            // Mark the element so the service worker can re-find it for
+            // scroll-stitched captures; the attribute is stripped on restore.
+            // The window global is the shadow-DOM-proof channel: both the
+            // overlay and the bounds probe run in this same isolated world.
+            try { hoverEl.setAttribute('data-fs-target', ''); } catch (_) {}
+            try { window.__fs_targetElement = hoverEl; } catch (_) {}
+            finish({
+              element: true,
+              rect: { left: r.left, top: r.top, width: r.width, height: r.height },
+              viewportWidth: window.innerWidth,
+              viewportHeight: window.innerHeight,
+              scrollX: window.scrollX,
+              scrollY: window.scrollY,
+            });
+            return;
+          }
+        }
+
         if (rect.width < MIN_SIZE || rect.height < MIN_SIZE) {
           hint.style.visibility = 'visible';
-          hint.textContent = 'Drag to select an area · Esc to cancel';
+          hint.textContent = 'Click an element · Drag an area · Esc to cancel';
           layout(null);
+          hoverEl = null;
           return;
         }
         finish({
@@ -460,6 +561,279 @@ function cropBitmapToRect(bitmap, selection) {
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
   return canvas.convertToBlob({ type: 'image/png' });
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  ELEMENT CAPTURE (click-picked element, scroll-stitched when tall)
+// ────────────────────────────────────────────────────────────────────────────
+async function captureElementRegion(tabId, output, windowId, selection = {}) {
+  let pagePrepared = false;
+
+  try {
+    notifyPopup(40, 'Locating element…');
+    await notifyPage(tabId, 40, 'Capturing element…');
+
+    // Detect and cache the scroll container FIRST (mirrors captureFullPage):
+    // preparePageForCapture reads __fs_scrollContainer, so prepping before
+    // detection would pin/save/zero the WINDOW instead of the real inner
+    // pane — skewing every measurement below and losing the pane's scroll.
+    await getPageMetrics(tabId);
+
+    // Pin scroll behavior and save the scroll position (restored by the
+    // finally). Chrome hiding stays OFF: select captures show the page as-is.
+    await prepareCapturePage(tabId, true);
+    pagePrepared = true;
+    await sleep(SCROLL_SETTLE_MS);
+
+    const metrics = await getPageMetrics(tabId);
+    const { stride, crop, clipOffsetTop, coverageHeight } = metrics;
+    const reach = clipOffsetTop + crop.height;
+    const maxScroll = Math.max(0, metrics.scrollHeight - coverageHeight);
+
+    // Element bounds in CONTENT coordinates (the container sits at
+    // scrollTop 0 after prep, so screen offsets are content offsets).
+    // Re-measurable, for the mid-capture restart below.
+    const measureBounds = async () => {
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          // The selection overlay stored the picked element on window
+          // (same isolated world) — this reaches shadow-DOM picks that
+          // document.querySelector cannot. The attribute is the fallback.
+          let el = (window.__fs_targetElement && window.__fs_targetElement.isConnected)
+            ? window.__fs_targetElement
+            : document.querySelector('[data-fs-target]');
+          if (!el || !el.isConnected) return null;
+          const sc = window.__fs_scrollContainer;
+          // Climb through shadow boundaries: parentElement stops at the
+          // shadow top, the root's host continues the chain.
+          const composedParent = (node) => {
+            const root = node.getRootNode?.();
+            return node.parentElement || (root && root.host) || null;
+          };
+          // An element outside the scroll container (a header above an inner
+          // pane), or one that is position:fixed (does not move when the
+          // container scrolls), cannot be stitch-captured — report it so the
+          // caller falls back to a plain visible-viewport crop. body/html
+          // (or window) as the container holds everything renderable, so
+          // only the fixed check can disqualify there.
+          let inContainer = !sc || sc === window
+            || sc === document.body || sc === document.documentElement;
+          let fixed = false;
+          let anc = el;
+          while (anc && anc !== document.body && anc !== document.documentElement) {
+            if (anc === sc) inContainer = true;
+            try {
+              if (getComputedStyle(anc).position === 'fixed') fixed = true;
+            } catch (_) {}
+            anc = composedParent(anc);
+          }
+          // Scroll-INVARIANT content coordinates: screen offset plus the
+          // container's live scroll. Valid both after prep (scrollTop 0)
+          // and mid-loop (restart re-measure at arbitrary scroll).
+          const isElement = sc && sc !== window;
+          const base = isElement ? sc.getBoundingClientRect().top : 0;
+          const scrollNow = isElement ? sc.scrollTop : window.scrollY;
+          const r = el.getBoundingClientRect();
+          const left = Math.max(0, r.left);
+          return {
+            inContainer: inContainer && !fixed,
+            top: r.top - base + scrollNow,
+            bottom: r.bottom - base + scrollNow,
+            left,
+            width: Math.max(1, Math.min(r.width, window.innerWidth - left)),
+          };
+        },
+      });
+      return result;
+    };
+
+    const bounds = await measureBounds();
+    if (!bounds) throw new Error('The selected element could not be found');
+
+    if (!bounds.inContainer) {
+      // Scroll-stitching cannot chase this element; capture the visible
+      // portion as a single shot instead. Crop from the CLICK-TIME rect: the
+      // viewport is re-pinned to the same scroll position, so those
+      // coordinates describe exactly what the camera now sees.
+      await injectScript(tabId, (x, y) => {
+        try { window.scrollTo({ left: x, top: y, behavior: 'instant' }); } catch (_) {}
+      }, [Number(selection.scrollX) || 0, Number(selection.scrollY) || 0]);
+      await sleep(OVERLAY_TEARDOWN_MS);
+      const dataUrl = await captureWithRetry(tabId, windowId, {
+        hideUi: true,
+        includeChrome: true,
+      });
+      const raw = selection.rect || {};
+      const rawLeft = Number(raw.left) || 0;
+      const rawTop = Number(raw.top) || 0;
+      const visLeft = Math.max(0, rawLeft);
+      const visTop = Math.max(0, rawTop);
+      const visWidth = Math.max(1,
+        Math.min(rawLeft + (Number(raw.width) || 0), selection.viewportWidth) - visLeft);
+      const visHeight = Math.max(1,
+        Math.min(rawTop + (Number(raw.height) || 0), selection.viewportHeight) - visTop);
+      const bitmap = await dataUrlToBitmap(dataUrl);
+      try {
+        const blob = await cropBitmapToRect(bitmap, {
+          left: visLeft,
+          top: visTop,
+          width: visWidth,
+          height: visHeight,
+          viewportWidth: selection.viewportWidth,
+          viewportHeight: selection.viewportHeight,
+        });
+        return await outputResult(blob, output, true, tabId);
+      } finally {
+        bitmap.close();
+      }
+    }
+
+    let outTop = Math.max(0, bounds.top);
+    let outBottom = Math.max(outTop + 1, bounds.bottom);
+    let outLeft = bounds.left;
+    let outW = Math.max(1, bounds.width);
+    const applyBounds = (b) => {
+      outTop = Math.max(0, b.top);
+      outBottom = Math.max(outTop + 1, b.bottom);
+      outLeft = b.left;
+      outW = Math.max(1, b.width);
+    };
+
+    // Fail fast on elements that can never fit the canvas.
+    const estW = Math.ceil(outW * metrics.devicePixelRatio);
+    const estH = Math.ceil((outBottom - outTop) * metrics.devicePixelRatio);
+    if (estW > MAX_CANVAS_DIMENSION || estH > MAX_CANVAS_DIMENSION
+      || estW * estH > MAX_CANVAS_PIXELS * 1.25) {
+      throw new Error('The captured element is too large for the browser to create safely');
+    }
+
+    notifyPopup(50, 'Capturing element…');
+    // Start with the element's top aligned to the top of the visible band.
+    const startFor = () => Math.max(0, Math.min(outTop - clipOffsetTop, maxScroll));
+    const tiles = [];
+    let prevScrollY = null;
+    let lastStableHeight = await getScrollHeight(tabId);
+    let restarts = 0;
+    let i = 0;
+
+    while (true) {
+      if (i >= MAX_TILES) {
+        if (prevScrollY + reach < outBottom - 0.5) {
+          throw new Error(`This element needs more than ${MAX_TILES} screenshot tiles`);
+        }
+        break;
+      }
+
+      await runInTab(tabId, (y) => {
+        if (window.top !== window) return;
+        const sc = window.__fs_scrollContainer;
+        if (sc && sc !== window) sc.scrollTop = y;
+        else window.scrollTo(0, y);
+      }, [startFor() + i * stride]);
+      await sleep(SCROLL_SETTLE_MS);
+
+      const actualScrollY = await getScrollY(tabId);
+      if (prevScrollY !== null && Math.abs(actualScrollY - prevScrollY) < 0.5) break;
+
+      const heightNow = await getScrollHeight(tabId);
+      if (heightNow < lastStableHeight - 1 && tiles.length > 0) {
+        // Content above the element was removed between tiles — the measured
+        // bounds are stale and every tile so far is misaligned. Re-measure
+        // and restart (bounded), mirroring captureFullPage's guard.
+        if (restarts < MAX_CAPTURE_RESTARTS) {
+          restarts++;
+          tiles.length = 0;
+          prevScrollY = null;
+          i = 0;
+          const fresh = await measureBounds();
+          if (!fresh) throw new Error('The selected element could not be found');
+          applyBounds(fresh);
+          lastStableHeight = await getScrollHeight(tabId);
+          continue;
+        }
+        lastStableHeight = heightNow;
+      } else {
+        lastStableHeight = Math.max(lastStableHeight, heightNow);
+      }
+
+      const estTiles = Math.max(1, Math.ceil((outBottom - outTop) / stride));
+      const pct = 50 + Math.min(30, Math.round((i / estTiles) * 30));
+      notifyPopup(pct, 'Capturing element…');
+      await notifyPage(tabId, pct, 'Capturing element…');
+
+      const dataUrl = await captureWithRetry(tabId, windowId, {
+        hideUi: true,
+        includeChrome: true,
+      });
+      tiles.push({ dataUrl, scrollY: actualScrollY });
+      if (actualScrollY + reach >= outBottom - 0.5) break;
+      prevScrollY = actualScrollY;
+      i++;
+    }
+
+    notifyPopup(82, 'Stitching element…');
+    if (!tiles.length) throw new Error('No screenshot tiles were captured');
+
+    const firstBitmap = await dataUrlToBitmap(tiles[0].dataUrl);
+    let blob;
+    try {
+      const scaleX = firstBitmap.width / Math.max(1, metrics.innerWidth);
+      const scaleY = firstBitmap.height / Math.max(1, metrics.innerHeight);
+
+      // The element may be unreachable in full (container can't scroll far
+      // enough) — never size the canvas past photographed coverage.
+      const coveredBottom = Math.min(outBottom, tiles[tiles.length - 1].scrollY + reach);
+      const canvasW = Math.max(1, Math.round(outW * scaleX));
+      const canvasH = Math.max(1, Math.ceil((coveredBottom - outTop) * scaleY));
+
+      if (!Number.isFinite(scaleX) || scaleX <= 0 || !Number.isFinite(scaleY) || scaleY <= 0
+        || canvasW > MAX_CANVAS_DIMENSION || canvasH > MAX_CANVAS_DIMENSION
+        || canvasW * canvasH > MAX_CANVAS_PIXELS) {
+        throw new Error('The captured element is too large for the browser to create safely');
+      }
+
+      const canvas = new OffscreenCanvas(canvasW, canvasH);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Unable to prepare the screenshot image');
+      ctx.imageSmoothingEnabled = false;
+
+      // Horizontal crop = the element's screen column; vertical mapping uses
+      // the unclamped container top (screen row s shows content
+      // scrollTop + (s - containerTop)).
+      const sourceX = Math.max(0, Math.min(firstBitmap.width - 1, Math.round(outLeft * scaleX)));
+      const sourceW = Math.max(1, Math.min(firstBitmap.width - sourceX, Math.round(outW * scaleX)));
+      const contentTopOnScreen = crop.top - clipOffsetTop;
+
+      for (let t = 0; t < tiles.length; t++) {
+        const tile = tiles[t];
+        const bitmap = t === 0 ? firstBitmap : await dataUrlToBitmap(tile.dataUrl);
+        const rowStart = Math.max(outTop, tile.scrollY + clipOffsetTop);
+        const nextStart = t + 1 < tiles.length
+          ? tiles[t + 1].scrollY + clipOffsetTop
+          : coveredBottom;
+        const rowEnd = Math.min(coveredBottom, Math.max(rowStart, nextStart));
+        const destY = Math.round((rowStart - outTop) * scaleY);
+        const destEnd = Math.round((rowEnd - outTop) * scaleY);
+        const sourceY = Math.max(0, Math.round((contentTopOnScreen + rowStart - tile.scrollY) * scaleY));
+        const drawH = Math.min(bitmap.height - sourceY, Math.max(0, destEnd - destY));
+
+        if (drawH > 0 && destY < canvasH) {
+          ctx.drawImage(bitmap, sourceX, sourceY, sourceW, drawH, 0, destY, sourceW, drawH);
+        }
+        if (bitmap !== firstBitmap) bitmap.close();
+      }
+
+      blob = await canvas.convertToBlob({ type: 'image/png' });
+    } finally {
+      firstBitmap.close();
+    }
+
+    notifyPopup(95, output === 'clipboard' ? 'Preparing clipboard…' : 'Saving PNG…');
+    return await outputResult(blob, output, true, tabId);
+  } finally {
+    if (pagePrepared) await restoreCaptureState(tabId).catch(() => {});
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1485,6 +1859,12 @@ function restorePageAfterCapture() {
 
   window.__fs_cancelSelection?.();
   document.getElementById('fs-select-root')?.remove();
+  window.__fs_targetElement = null;
+  try {
+    document.querySelectorAll('[data-fs-target]').forEach((el) => {
+      el.removeAttribute('data-fs-target');
+    });
+  } catch (_) {}
 
   for (const state of window.__fs_captureUi || []) {
     if (!state?.el?.style) continue;

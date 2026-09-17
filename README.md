@@ -7,7 +7,7 @@ A lightweight Manifest V3 Chrome/Brave extension. It captures full-page or visib
 - **Full Page Screenshot:** Scrolls and stitches the entire webpage into one PNG. Tiles are cropped to the content rect, so scrollbars and app chrome around inner scroll panes stay out of the shot.
 - **Clean capture (default):** Detects and removes site headers, footers, cookie bars, and `position: fixed` overlays so they do not repeat on every tile. Sticky elements, table headers, and open dialogs are hidden *in place* so the page layout doesn't reflow mid-capture. Nested content (article headers, bylines) is preserved.
 - **Original capture:** Optional toggle keeps headers, footers, and overlays as they appear on the live page.
-- **Select area:** Drag a rectangle on the current view. Clean/Original does not apply.
+- **Select area:** Click an element to capture it — hovering highlights it like the Windows/OSX snip tools — or drag a rectangle. Elements taller than the viewport are scroll-captured and stitched; width is capped to the visible column. Clean/Original does not apply.
 - **Visible:** Capture just the current viewport.
 - **Rate-limit resilience:** Throttles and retries `captureVisibleTab` (Chrome/Brave cap ~2 calls/sec).
 - **Robust clipboard delivery:** The finished PNG is written to the clipboard from an offscreen document, so a capture still lands even if the popup was closed mid-capture. The popup's clipboard write is only a fallback.
@@ -27,7 +27,7 @@ Reload the extension after updates so the service worker picks up changes.
 
 - **Clean** (default): strip repeating page chrome on Full page and Visible captures.
 - **Original**: capture the page as-is, including headers and footers.
-- **Select area**: drag a rectangle on the current view. Clean/Original is ignored.
+- **Select area**: click an element to capture it (hover shows what will be captured), or drag a rectangle. Clean/Original is ignored.
 
 ## Project Structure
 
