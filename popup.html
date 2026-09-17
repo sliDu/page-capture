@@ -26,7 +26,11 @@
       width: 360px;
       min-height: 100%;
       margin: 0;
-      overflow: hidden;
+      /* Progress bar + toast stack past Chrome's 600px popup height cap on
+         success; clipping them with overflow:hidden hid the only feedback
+         surface. Let the popup scroll instead. */
+      overflow-x: hidden;
+      overflow-y: auto;
       color: var(--ink);
       background:
         radial-gradient(circle at 85% -7%, rgba(128, 104, 255, .21), transparent 33%),
@@ -511,6 +515,7 @@
   </main>
 
   <footer class="footer">Private capture, processed locally</footer>
+  <script src="shared.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
