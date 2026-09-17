@@ -1,4 +1,4 @@
-# FullSnap – Full Page Screenshot Extension
+# Page Capture
 
 A lightweight Manifest V3 Chrome/Brave extension. It captures full-page or visible-area screenshots, stitches tiles, and by default strips repeating headers, footers, and sticky/fixed chrome.
 
